@@ -7,6 +7,7 @@ import face_recognition
 from pymongo import MongoClient
 import pickle
 import datetime
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -20,20 +21,20 @@ employees_col = db["employees"]
 logs_col = db["attendance_logs"]
 
 # ======================================
-# 🔹 Step 2: Load known faces from MongoDB
+# 🔹 Step 2: Helper function to fetch known faces
 # ======================================
-known_face_encodings = []
-known_face_names = []
-known_face_ids = []
+def get_known_faces():
+    known_face_encodings = []
+    known_face_names = []
+    known_face_ids = []
 
-for emp in employees_col.find({}):
-    # Stored as pickled numpy arrays
-    encoding = pickle.loads(emp["face_encoding"])
-    known_face_encodings.append(encoding)
-    known_face_names.append(emp["name"])
-    known_face_ids.append(emp["_id"])
-
-print(f"✅ Loaded {len(known_face_encodings)} known faces from MongoDB.")
+    for emp in employees_col.find({}, {"name": 1, "face_encoding": 1}):
+        encoding = np.array(pickle.loads(emp["face_encoding"]), dtype=np.float32)
+        known_face_encodings.append(encoding)
+        known_face_names.append(emp["name"])
+        known_face_ids.append(emp["_id"])
+    
+    return known_face_encodings, known_face_names, known_face_ids
 
 # ======================================
 # 🔹 Step 3: Define Flask routes
@@ -51,40 +52,42 @@ def checkout():
 # ======================================
 def process_face(action):
     try:
+        # Decode image from base64
         data = request.get_json()
         image_data = data["image"].split(",")[1]
         image_bytes = base64.b64decode(image_data)
-
-        # Convert bytes to numpy array for OpenCV
         np_arr = np.frombuffer(image_bytes, np.uint8)
         frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-        # Convert to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Resize to reduce memory usage (25% of original)
+        small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
         # Detect faces
         face_locations = face_recognition.face_locations(rgb_frame, model="hog")
         if not face_locations:
             return jsonify({"status": "error", "message": "No face detected"}), 400
 
-        # Compute encodings for first detected face
+        # Compute encodings for first face
         face_encodings = face_recognition.face_encodings(rgb_frame, [face_locations[0]])
         if not face_encodings:
             return jsonify({"status": "error", "message": "Could not extract face encoding"}), 400
 
         face_encoding = face_encodings[0]
 
+        # Load known faces on-demand
+        known_face_encodings, known_face_names, known_face_ids = get_known_faces()
+
         # Compare with known faces
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         name = "Unknown"
         emp_id = None
-
         if True in matches:
             first_match_index = matches.index(True)
             name = known_face_names[first_match_index]
             emp_id = known_face_ids[first_match_index]
 
-        # Log attendance in MongoDB
+        # Log attendance
         logs_col.insert_one({
             "employee_id": emp_id,
             "name": name,
@@ -93,6 +96,10 @@ def process_face(action):
         })
 
         print(f"{action.upper()} detected for: {name}")
+
+        # Free memory
+        del frame, small_frame, rgb_frame, face_encodings, face_locations
+
         return jsonify({"status": "success", "name": name})
 
     except Exception as e:
@@ -104,4 +111,5 @@ def process_face(action):
 # ======================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
