@@ -155,9 +155,6 @@ recent_cache_lock = threading.Lock()
 # ======================================
 # 🔹 FULL REWRITTEN PROCESS_FACE (FINAL)
 # ======================================
-# ======================================
-# 🔹 FULL REWRITTEN PROCESS_FACE (FINAL)
-# ======================================
 def process_face(action):
     global sync_thread_started
     global recent_cache_lock
@@ -229,15 +226,18 @@ def process_face(action):
             else:
                  return jsonify({"status": "already_done", "name": name, "message": "Attendance complete today."})
 
-        # --- RESTRICTION GUARDS (FIXED FOR BREAKS) ---
+        # --- RESTRICTION GUARDS ---
         
         # Check In Guard
         if final_action == "checkin" and daily and daily.get("check_in"):
             return jsonify({"status": "already_done", "name": name, "message": "Already checked in."})
         
-        # Check Out / Remote Guard
-        if final_action in ["checkout", "switch_remote"] and daily and daily.get("check_out"):
-            return jsonify({"status": "already_done", "name": name, "message": "Already checked out."})
+        # Check Out / Remote Guard (NEW: Added check for previous check-in)
+        if final_action in ["checkout", "switch_remote"]:
+            if not daily or not daily.get("check_in"):
+                return jsonify({"status": "error", "message": "Must Check In first!"})
+            if daily.get("check_out"):
+                return jsonify({"status": "already_done", "name": name, "message": "Already checked out."})
         
         # Break In Guards
         if final_action == "breakin":
@@ -290,6 +290,12 @@ def process_face(action):
                 updates["check_out"] = timestamp_beirut.replace(hour=17, minute=0)
             updates["check_in_source"] = "continue_working_from_home"
 
+        # --- FIX: Auto-fill Break Out if missing during Checkout ---
+        if final_action in ["checkout", "switch_remote"]:
+            # If user has a break_in recorded BUT no break_out yet
+            if daily and daily.get("break_in") and not daily.get("break_out"):
+                updates["break_out"] = updates.get("check_out")
+        
         updates["sync_status"] = "pending"
         logs_col.update_one({"_id": daily["_id"]}, {"$set": updates})
 
@@ -326,7 +332,12 @@ def process_face(action):
                         if current_in and time_str_sf <= current_in:
                             corrected_dt = timestamp_beirut + datetime.timedelta(minutes=1)
                             time_str_sf = fmt_time(corrected_dt)
+                        
                         up_payload["Check_Out__c"] = time_str_sf
+                        
+                        # Sync the auto-filled break_out to Salesforce
+                        if updates.get("break_out"):
+                            up_payload["Break_Out__c"] = fmt_time(updates["break_out"])
                     
                     elif final_action == "checkin": up_payload["Check_In__c"] = time_str_sf
                     elif final_action == "breakin": up_payload["Break_In__c"] = time_str_sf
